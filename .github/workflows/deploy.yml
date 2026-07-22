@@ -14,6 +14,9 @@ env:
   REGION: ${{ secrets.GCP_REGION }}
   ARTIFACT_REGISTRY: ${{ secrets.ARTIFACT_REGISTRY }}   # e.g. "linkedin-builder"
   SERVICE: ${{ secrets.CLOUD_RUN_SERVICE }}             # e.g. "linkedin-profile-builder"
+  # Vertex AI region for Gemini. Independent of the Cloud Run region above:
+  # the model must be served here. Optional secret; defaults to us-central1.
+  VERTEX_LOCATION: ${{ secrets.VERTEX_LOCATION }}
 
 jobs:
   deploy:
@@ -87,13 +90,16 @@ jobs:
       - name: Deploy to Cloud Run
         id: deploy
         run: |
+          # Vertex AI location must serve the Gemini model; it is NOT tied to
+          # the Cloud Run region. Default to us-central1 if the secret is unset.
+          VERTEX_LOCATION="${VERTEX_LOCATION:-us-central1}"
           gcloud run deploy "${SERVICE}" \
             --image "${{ steps.vars.outputs.IMAGE }}" \
             --region "${REGION}" \
             --platform managed \
             --allow-unauthenticated \
             --port 8080 \
-            --set-env-vars "GOOGLE_CLOUD_PROJECT=${PROJECT_ID},GOOGLE_CLOUD_LOCATION=${REGION}"
+            --set-env-vars "GOOGLE_CLOUD_PROJECT=${PROJECT_ID},GOOGLE_CLOUD_LOCATION=${VERTEX_LOCATION}"
 
       # 10. Print the public service URL.
       - name: Show deployment URL
