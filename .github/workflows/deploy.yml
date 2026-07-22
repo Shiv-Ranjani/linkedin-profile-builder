@@ -1,0 +1,95 @@
+name: Build and Deploy to Cloud Run
+
+# Deploy automatically whenever code is pushed to the main branch.
+on:
+  push:
+    branches: ["main"]
+
+# Required for Workload Identity Federation (keyless auth to Google Cloud).
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  # These come from GitHub repository secrets (Settings > Secrets > Actions).
+  PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+  REGION: ${{ secrets.GCP_REGION }}
+  ARTIFACT_REGISTRY: ${{ secrets.ARTIFACT_REGISTRY }}   # e.g. "linkedin-builder"
+  SERVICE: ${{ secrets.CLOUD_RUN_SERVICE }}             # e.g. "linkedin-profile-builder"
+
+jobs:
+  deploy:
+    name: Build image and deploy
+    runs-on: ubuntu-latest
+
+    steps:
+      # 1. Check out the repository.
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # 2. Set up Python (used for optional lint / sanity checks).
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Sanity check (compile sources)
+        run: python -m compileall app.py utils.py prompts.py
+
+      # 3. Compute a unique image tag from the commit SHA.
+      - name: Set image tag
+        id: vars
+        run: echo "IMAGE=${REGION}-docker.pkg.dev/${PROJECT_ID}/${ARTIFACT_REGISTRY}/${SERVICE}:${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+      # 4. Authenticate to Google Cloud using Workload Identity Federation.
+      #    (Preferred: keyless. See README for the JSON-key alternative.)
+      - name: Authenticate to Google Cloud
+        id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.SERVICE_ACCOUNT_EMAIL }}
+
+          # ---------------------------------------------------------------
+          # ALTERNATIVE: Service Account Key JSON (less secure).
+          # Comment out the two lines above and uncomment the line below,
+          # then store the full JSON in the GCP_SA_KEY secret.
+          # credentials_json: ${{ secrets.GCP_SA_KEY }}
+          # ---------------------------------------------------------------
+
+      # 5. Install and configure the gcloud CLI.
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      # 6. Configure Docker to push to Artifact Registry.
+      - name: Configure Docker authentication
+        run: gcloud auth configure-docker ${REGION}-docker.pkg.dev --quiet
+
+      # 7. Build the Docker image.
+      - name: Build Docker image
+        run: docker build -t "${{ steps.vars.outputs.IMAGE }}" .
+
+      # 8. Push the image to Artifact Registry.
+      - name: Push image to Artifact Registry
+        run: docker push "${{ steps.vars.outputs.IMAGE }}"
+
+      # 9. Deploy to Cloud Run. The OpenAI key is injected as an env var.
+      - name: Deploy to Cloud Run
+        id: deploy
+        run: |
+          gcloud run deploy "${SERVICE}" \
+            --image "${{ steps.vars.outputs.IMAGE }}" \
+            --region "${REGION}" \
+            --platform managed \
+            --allow-unauthenticated \
+            --port 8080 \
+            --set-env-vars "OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}"
+
+      # 10. Print the public service URL.
+      - name: Show deployment URL
+        run: |
+          URL=$(gcloud run services describe "${SERVICE}" \
+            --region "${REGION}" --format 'value(status.url)')
+          echo "Deployed to: ${URL}"
+          echo "### 🚀 Deployed to Cloud Run" >> "$GITHUB_STEP_SUMMARY"
+          echo "[$URL]($URL)" >> "$GITHUB_STEP_SUMMARY"
