@@ -34,6 +34,22 @@ jobs:
       - name: Sanity check (compile sources)
         run: python -m compileall app.py utils.py prompts.py
 
+      # Fail fast with a clear message if any required secret is missing/empty.
+      - name: Verify required secrets
+        run: |
+          missing=""
+          [ -z "${PROJECT_ID}" ] && missing="${missing} GCP_PROJECT_ID"
+          [ -z "${REGION}" ] && missing="${missing} GCP_REGION"
+          [ -z "${ARTIFACT_REGISTRY}" ] && missing="${missing} ARTIFACT_REGISTRY"
+          [ -z "${SERVICE}" ] && missing="${missing} CLOUD_RUN_SERVICE"
+          if [ -n "${missing}" ]; then
+            echo "::error::Missing/empty repository secrets:${missing}"
+            echo "Add them under Settings > Secrets and variables > Actions"
+            echo "on the SECRETS tab (not Variables)."
+            exit 1
+          fi
+          echo "All required deploy secrets are present."
+
       # 3. Compute a unique image tag from the commit SHA.
       - name: Set image tag
         id: vars
