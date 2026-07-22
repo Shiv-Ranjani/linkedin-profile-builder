@@ -1,12 +1,14 @@
 """Utility helpers for the AI LinkedIn Profile Builder.
 
 Responsibilities:
-    * Load configuration (OpenAI API key) from the environment.
-    * Provide a thin, well-documented wrapper around the OpenAI Chat API.
+    * Load configuration (GCP project / location) from the environment.
+    * Provide a thin, well-documented wrapper around Vertex AI Gemini.
     * Parse the model's Markdown response back into individual sections.
 
-All network/error handling lives here so that ``app.py`` stays focused on the
-Streamlit user interface.
+Authentication uses Application Default Credentials (ADC) - there is NO API
+key. Locally you run ``gcloud auth application-default login``; on Cloud Run the
+service account identity is used automatically. All network/error handling lives
+here so that ``app.py`` stays focused on the Streamlit user interface.
 """
 
 from __future__ import annotations
@@ -23,8 +25,10 @@ from prompts import SECTION_TITLES, SYSTEM_PROMPT, build_profile_prompt
 # the environment already provides them, e.g. Cloud Run).
 load_dotenv()
 
-# Default model. Can be overridden via the OPENAI_MODEL environment variable.
-DEFAULT_MODEL: str = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+# GCP configuration. On Cloud Run these are provided as environment variables.
+DEFAULT_LOCATION: str = os.getenv("GOOGLE_CLOUD_LOCATION", "us-central1")
+# Default Gemini model. Can be overridden via the GEMINI_MODEL env variable.
+DEFAULT_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-2.0-flash-001")
 
 
 class ProfileGenerationError(Exception):
@@ -34,53 +38,71 @@ class ProfileGenerationError(Exception):
     """
 
 
-def get_api_key() -> str:
-    """Read the OpenAI API key from the environment.
+def get_project_id() -> str:
+    """Read the Google Cloud project id from the environment.
 
     Returns:
-        The API key string.
+        The GCP project id string.
 
     Raises:
-        ProfileGenerationError: If the key is missing or empty.
+        ProfileGenerationError: If no project id can be found.
     """
 
-    api_key = os.getenv("OPENAI_API_KEY", "").strip()
-    if not api_key:
+    project = (
+        os.getenv("GOOGLE_CLOUD_PROJECT")
+        or os.getenv("GCP_PROJECT_ID")
+        or os.getenv("GOOGLE_CLOUD_PROJECT_ID")
+        or ""
+    ).strip()
+    if not project:
         raise ProfileGenerationError(
-            "OPENAI_API_KEY is not set. Add it to your .env file locally or "
-            "configure it as an environment variable / secret in Cloud Run."
+            "GOOGLE_CLOUD_PROJECT is not set. Add it to your .env file locally "
+            "or configure it as an environment variable on Cloud Run."
         )
-    return api_key
+    return project
 
 
 def _get_client():
-    """Create an OpenAI client using the latest SDK.
+    """Create a Vertex AI Gemini client using Application Default Credentials.
 
     Returns:
-        An initialized ``openai.OpenAI`` client.
+        An initialized ``google.genai.Client`` bound to Vertex AI.
 
     Raises:
-        ProfileGenerationError: If the SDK is missing or the key is invalid.
+        ProfileGenerationError: If the SDK is missing or credentials are absent.
     """
 
     try:
         # Imported lazily so that missing dependencies produce a clear message.
-        from openai import OpenAI
+        from google import genai
     except ImportError as exc:  # pragma: no cover - defensive guard
         raise ProfileGenerationError(
-            "The 'openai' package is not installed. Run "
+            "The 'google-genai' package is not installed. Run "
             "'pip install -r requirements.txt'."
         ) from exc
 
-    return OpenAI(api_key=get_api_key())
+    try:
+        # vertexai=True routes requests through Vertex AI using ADC (no key).
+        return genai.Client(
+            vertexai=True,
+            project=get_project_id(),
+            location=DEFAULT_LOCATION,
+        )
+    except Exception as exc:
+        raise ProfileGenerationError(
+            "Could not initialize the Vertex AI client. Run "
+            "'gcloud auth application-default login' locally, or ensure the "
+            "Cloud Run service account has the 'roles/aiplatform.user' role. "
+            f"Details: {exc}"
+        ) from exc
 
 
 def generate_profile(data: Dict[str, str], model: str = DEFAULT_MODEL) -> str:
-    """Call the OpenAI API and return the raw Markdown profile.
+    """Call Vertex AI Gemini and return the raw Markdown profile.
 
     Args:
         data: Dictionary of raw student inputs collected from the UI.
-        model: The OpenAI chat model to use.
+        model: The Gemini model id to use.
 
     Returns:
         The full Markdown string returned by the model.
@@ -89,26 +111,29 @@ def generate_profile(data: Dict[str, str], model: str = DEFAULT_MODEL) -> str:
         ProfileGenerationError: For any API, network or configuration failure.
     """
 
+    from google.genai import types
+
     client = _get_client()
     user_prompt = build_profile_prompt(data)
 
     try:
-        response = client.chat.completions.create(
+        response = client.models.generate_content(
             model=model,
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": user_prompt},
-            ],
-            temperature=0.6,
-            max_tokens=1800,
+            contents=user_prompt,
+            config=types.GenerateContentConfig(
+                system_instruction=SYSTEM_PROMPT,
+                temperature=0.6,
+                max_output_tokens=2048,
+            ),
         )
     except Exception as exc:  # Broad catch: surface a clean message to the UI.
         raise ProfileGenerationError(
-            f"OpenAI request failed: {exc}. Please verify your API key, "
-            "billing status and internet connection, then try again."
+            f"Vertex AI request failed: {exc}. Please verify your GCP project, "
+            "that the Vertex AI API is enabled, your credentials/permissions "
+            "and internet connection, then try again."
         ) from exc
 
-    content = (response.choices[0].message.content or "").strip()
+    content = (response.text or "").strip()
     if not content:
         raise ProfileGenerationError(
             "The model returned an empty response. Please try again."

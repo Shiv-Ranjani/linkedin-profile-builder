@@ -1,8 +1,9 @@
 # 💼 AI LinkedIn Profile Builder
 
 Generate a professional, recruiter-ready LinkedIn profile from your real college
-information using AI. Built with **Python + Streamlit + OpenAI**, containerized
-with **Docker**, and deployed to **Google Cloud Run** via **GitHub Actions**.
+information using AI. Built with **Python + Streamlit + Vertex AI (Gemini)**,
+containerized with **Docker**, and deployed to **Google Cloud Run** via
+**GitHub Actions**. Fully GCP-native — **no third-party API key required**.
 
 > 🛡️ **Honesty guarantee:** the AI only rewrites and polishes what *you* enter.
 > It never invents fake companies, internships, certifications or achievements.
@@ -49,17 +50,16 @@ cloud deployment practices.
    Artifact Registry
             |
             v
-      Cloud Run  <---- OPENAI_API_KEY (secret)
-            |
-            v
-      OpenAI API
+      Cloud Run  ---- (service account, ADC) ---->  Vertex AI (Gemini)
             |
             v
         Browser
 ```
 
-At runtime the Streamlit app (on Cloud Run) collects inputs, calls the OpenAI
-API, parses the Markdown response into sections, and renders them in the browser.
+At runtime the Streamlit app (on Cloud Run) collects inputs, calls **Vertex AI
+Gemini** using the runtime service account (Application Default Credentials — no
+key), parses the Markdown response into sections, and renders them in the
+browser.
 
 ---
 
@@ -70,17 +70,19 @@ API, parses the Markdown response into sections, and renders them in the browser
 - Loading spinner + progress indicator during generation.
 - Expandable containers with copy-ready code blocks per section.
 - Input validation (name, career goal and skills are required).
-- Graceful OpenAI error handling with friendly messages.
-- Model selector (`gpt-4o-mini` / `gpt-4o`).
+- Graceful Vertex AI error handling with friendly messages.
+- Model selector (`gemini-2.0-flash-001` / `gemini-1.5-pro-002`).
 - Production-ready Dockerfile (non-root user, port 8080).
-- Automated CI/CD to Cloud Run with Workload Identity Federation.
+- Automated CI/CD to Cloud Run (Service Account Key auth; WIF optional).
+- No API key to manage — auth via Application Default Credentials.
 
 ---
 
 ## 🧰 Tech Stack
 
-Python 3.11 · Streamlit · OpenAI Python SDK · python-dotenv · Docker ·
-GitHub · GitHub Actions · Google Cloud (Artifact Registry, Cloud Run).
+Python 3.11 · Streamlit · Google Gen AI SDK (Vertex AI / Gemini) ·
+python-dotenv · Docker · GitHub · GitHub Actions ·
+Google Cloud (Vertex AI, Artifact Registry, Cloud Run).
 
 ---
 
@@ -101,8 +103,12 @@ source .venv/bin/activate
 # 3. Install dependencies
 pip install -r requirements.txt
 
-# 4. Configure your API key
-cp .env.example .env      # then edit .env and add your OPENAI_API_KEY
+# 4. Configure your GCP project
+cp .env.example .env      # then edit .env and set GOOGLE_CLOUD_PROJECT
+
+# 5. Authenticate to Google Cloud (Application Default Credentials — no key)
+gcloud auth application-default login
+gcloud services enable aiplatform.googleapis.com --project YOUR_PROJECT_ID
 ```
 
 ---
@@ -123,8 +129,13 @@ Open the URL Streamlit prints (usually http://localhost:8501).
 # Build the image
 docker build -t linkedin-profile-builder .
 
-# Run the container (maps host 8080 -> container 8080)
-docker run -p 8080:8080 -e OPENAI_API_KEY=sk-your-key linkedin-profile-builder
+# Run the container. Mount your local ADC so Vertex AI auth works (no key).
+docker run -p 8080:8080 \
+  -e GOOGLE_CLOUD_PROJECT=your-gcp-project-id \
+  -e GOOGLE_CLOUD_LOCATION=us-central1 \
+  -e GOOGLE_APPLICATION_CREDENTIALS=/tmp/adc.json \
+  -v "$HOME/.config/gcloud/application_default_credentials.json:/tmp/adc.json:ro" \
+  linkedin-profile-builder
 ```
 
 Then open http://localhost:8080.
@@ -137,7 +148,7 @@ The workflow at `.github/workflows/deploy.yml` runs on every push to `main` and:
 
 1. Checks out the repository.
 2. Sets up Python 3.11 and compiles the sources as a sanity check.
-3. Authenticates to Google Cloud (Workload Identity Federation).
+3. Authenticates to Google Cloud (Service Account Key JSON via `GCP_SA_KEY`).
 4. Configures Docker for Artifact Registry.
 5. Builds the Docker image.
 6. Pushes the image to Artifact Registry.
@@ -156,16 +167,31 @@ Add these under **Settings → Secrets and variables → Actions**:
 | `GCP_REGION` | Deployment region | `us-central1` |
 | `ARTIFACT_REGISTRY` | Artifact Registry repo name | `linkedin-builder` |
 | `CLOUD_RUN_SERVICE` | Cloud Run service name | `linkedin-profile-builder` |
-| `OPENAI_API_KEY` | Your OpenAI API key | `sk-...` |
-| `WORKLOAD_IDENTITY_PROVIDER` | WIF provider resource name | `projects/123.../providers/github` |
-| `SERVICE_ACCOUNT_EMAIL` | Deploy service account email | `deployer@my-gcp-project.iam.gserviceaccount.com` |
+| `GCP_SA_KEY` | **Full JSON** of the deploy service account key | `{ "type": "service_account", ... }` |
 
-**Alternative (Service Account Key JSON):** if you cannot use Workload Identity
-Federation, create a service account key and store the entire JSON in a secret
-named `GCP_SA_KEY`. Then in `deploy.yml`, comment out the
-`workload_identity_provider` / `service_account` lines and uncomment the
-`credentials_json: ${{ secrets.GCP_SA_KEY }}` line. WIF is preferred because it
-avoids long-lived keys.
+> ✅ No `OPENAI_API_KEY` — the app calls Vertex AI using the Cloud Run
+> **runtime identity** (the default compute service account) via ADC. That
+> account just needs `roles/aiplatform.user` (granted in the setup steps below).
+>
+> 🔐 `GCP_SA_KEY` is used only by GitHub Actions to **deploy**. Treat it as a
+> secret, never commit it, and rotate it periodically. (Keyless Workload
+> Identity Federation is more secure — see the note below if you switch.)
+
+Create the `GCP_SA_KEY` value like this (run after creating the deploy service
+account in the setup section below):
+
+```bash
+gcloud iam service-accounts keys create key.json \
+  --iam-account="$SA_EMAIL" --project "$PROJECT_ID"
+# Copy the ENTIRE contents of key.json into the GCP_SA_KEY GitHub secret,
+# then delete the local file so the key never lingers on disk.
+rm key.json
+```
+
+**More secure alternative — Workload Identity Federation (keyless):** if you
+prefer to avoid long-lived keys, use WIF instead. Replace the auth step in
+`deploy.yml` with `workload_identity_provider` + `service_account`, add the
+`id-token: write` permission, and set up a WIF pool (see the section below).
 
 ---
 
@@ -178,11 +204,12 @@ export REGION=us-central1
 export REPO=linkedin-builder
 export SERVICE=linkedin-profile-builder
 
-# 1. Enable required APIs
+# 1. Enable required APIs (note: aiplatform for Vertex AI / Gemini)
 gcloud services enable \
   run.googleapis.com \
   artifactregistry.googleapis.com \
   iamcredentials.googleapis.com \
+  aiplatform.googleapis.com \
   --project "$PROJECT_ID"
 
 # 2. Create an Artifact Registry Docker repository
@@ -197,12 +224,29 @@ gcloud iam service-accounts create github-deployer \
 
 export SA_EMAIL="github-deployer@${PROJECT_ID}.iam.gserviceaccount.com"
 
-# 4. Grant the roles needed to push images and deploy
+# 4. Grant the deployer the roles needed to push images and deploy
 for ROLE in roles/run.admin roles/artifactregistry.writer roles/iam.serviceAccountUser; do
   gcloud projects add-iam-policy-binding "$PROJECT_ID" \
     --member="serviceAccount:${SA_EMAIL}" --role="$ROLE"
 done
+
+# 5. Let the Cloud Run runtime identity call Vertex AI.
+#    Cloud Run uses the DEFAULT compute service account unless you specify one,
+#    so we grant that account the Vertex AI role. No extra secret needed.
+export PROJECT_NUMBER=$(gcloud projects describe "$PROJECT_ID" \
+  --format='value(projectNumber)')
+export RUNTIME_SA="${PROJECT_NUMBER}-compute@developer.gserviceaccount.com"
+
+gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+  --member="serviceAccount:${RUNTIME_SA}" --role="roles/aiplatform.user"
 ```
+
+Put `$SA_EMAIL` into the `SERVICE_ACCOUNT_EMAIL` secret.
+
+> 💡 Prefer a dedicated (least-privilege) runtime account instead of the default
+> compute one? Create your own SA, grant it `roles/aiplatform.user`, and add
+> `--service-account YOUR_SA_EMAIL` back to the `gcloud run deploy` step in
+> `.github/workflows/deploy.yml`.
 
 ### Workload Identity Federation (keyless auth)
 

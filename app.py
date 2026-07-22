@@ -1,12 +1,14 @@
 """AI LinkedIn Profile Builder - Streamlit application.
 
 A modern, student-friendly web app that turns raw academic and project
-information into a polished LinkedIn profile using the OpenAI API.
+information into a polished LinkedIn profile using Vertex AI (Gemini).
 
 Run locally:
+    gcloud auth application-default login
     streamlit run app.py
 
-The app reads OPENAI_API_KEY from the environment (or a local .env file).
+The app reads GOOGLE_CLOUD_PROJECT from the environment (or a local .env file)
+and authenticates via Application Default Credentials - no API key required.
 """
 
 from __future__ import annotations
@@ -114,10 +116,10 @@ def render_sidebar() -> str:
         st.divider()
         st.subheader("Model")
         model = st.selectbox(
-            "OpenAI model",
-            options=["gpt-4o-mini", "gpt-4o"],
+            "Vertex AI Gemini model",
+            options=["gemini-2.0-flash-001", "gemini-1.5-pro-002"],
             index=0,
-            help="gpt-4o-mini is fast and low-cost; gpt-4o is more detailed.",
+            help="Flash is fast and low-cost; Pro is more detailed.",
         )
         st.divider()
         st.info(
