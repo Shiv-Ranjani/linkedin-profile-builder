@@ -117,9 +117,9 @@ def render_sidebar() -> str:
         st.subheader("Model")
         model = st.selectbox(
             "Vertex AI Gemini model",
-            options=["gemini-2.0-flash-001", "gemini-1.5-pro-002"],
+            options=["gemini-2.0-flash-001", "gemini-2.5-flash", "gemini-2.5-pro"],
             index=0,
-            help="Flash is fast and low-cost; Pro is more detailed.",
+            help="Flash is fast and low-cost; 2.5 Pro is the most detailed.",
         )
         st.divider()
         st.info(
