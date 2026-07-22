@@ -28,7 +28,7 @@ load_dotenv()
 # GCP configuration. On Cloud Run these are provided as environment variables.
 DEFAULT_LOCATION: str = os.getenv("GOOGLE_CLOUD_LOCATION", "us-central1")
 # Default Gemini model. Can be overridden via the GEMINI_MODEL env variable.
-DEFAULT_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-2.0-flash-001")
+DEFAULT_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 
 
 class ProfileGenerationError(Exception):
