@@ -241,7 +241,15 @@ gcloud projects add-iam-policy-binding "$PROJECT_ID" \
   --member="serviceAccount:${RUNTIME_SA}" --role="roles/aiplatform.user"
 ```
 
-Put `$SA_EMAIL` into the `SERVICE_ACCOUNT_EMAIL` secret.
+Then create a JSON key for `$SA_EMAIL` and store its full contents in the
+`GCP_SA_KEY` GitHub secret:
+
+```bash
+gcloud iam service-accounts keys create key.json \
+  --iam-account="$SA_EMAIL" --project "$PROJECT_ID"
+# paste key.json into the GCP_SA_KEY secret, then delete it locally
+rm key.json
+```
 
 > 💡 Prefer a dedicated (least-privilege) runtime account instead of the default
 > compute one? Create your own SA, grant it `roles/aiplatform.user`, and add
